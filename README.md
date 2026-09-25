@@ -12,9 +12,12 @@ defect check, and a lot-level **% Grade A / % URS by weight**, with a signed PDF
 3. **Size** – colour segmentation + watershed for touching onions, ellipse fit,
    parallax correction from the camera height (onions stand ~D/2 above the paper).
 4. **Defects** – MobileNetV3-Small, 3 heads: rotten → UNFIT, sprouted → URS,
-   other anomaly → inspector review (never auto-downgrades).
-5. **Rules** – configurable size band (default 45–70 mm), mass-weighted lot percentages.
-6. **Report** – annotated image, per-onion table, HMAC-signed JSON record, PDF.
+   other anomaly → inspector review (never auto-downgrades). Leafy non-onion objects are excluded.
+5. **Rules** – configurable size band (default 45–70 mm), mass-weighted lot percentages;
+   onions within 2 mm of a limit are flagged borderline and the lot % is shown as a range.
+6. **Inspector in the loop** – every flagged onion gets Keep A / URS / Unfit buttons; the AI grade
+   and the inspector's decision (name, time) are both kept in the signed record.
+7. **Report** – annotated image, per-onion table, HMAC-signed JSON record, PDF.
 
 ## Results so far (prototype, one kitchen lot)
 | Check | Result |
@@ -25,7 +28,8 @@ defect check, and a lot-level **% Grade A / % URS by weight**, with a signed PDF
 | Parallax correction | halves the error (7.4 → 3.9 mm) |
 | Lot % Grade A (truth 100 %) | 100 % on all 5 labelled photos |
 | Packed heap / tilted phone | rejected with retake advice |
-| Processing time | ≈ 3–4 s per photo on a laptop CPU |
+| Processing time | ≈ 3–6 s per photo on a laptop CPU (incl. phone upload) |
+| Borderline onion (ruler 70 mm) | read 70.2 and 68.1 mm in two scans, flagged borderline both times |
 
 Limitations: one variety and one lot tested; foreign objects are only caught when they have
 leafy-green parts; black mould is not a trained class; size band pending DoCA/AGMARK confirmation.
@@ -44,7 +48,7 @@ python -m venv .venv
 .venv\Scripts\activate            # Windows   (source .venv/bin/activate on Mac/Linux)
 pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
 pip install -r requirements.txt
-python -m nikash.test_pipeline    # 46 checks, should end with ALL PASSED
+python -m nikash.test_pipeline    # should end with ALL PASSED
 python app.py                     # prints laptop link, phone link and a QR code
 ```
 Print the reference sheet: `python nikash/make_sheet.py` → A3, 100 % scale, check the 150 mm ruler.
