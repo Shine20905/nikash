@@ -490,6 +490,51 @@ def merge_views(views, cfg):
 # --------------------------------------------------------------------------------------
 def _sha256(b): return hashlib.sha256(b).hexdigest()
 
+def summarize_lot(onions, cfg):
+    """Lot percentages from per-onion grades. Re-run after an inspector decision changes a grade.
+    An onion the inspector has decided is no longer uncertain: it leaves the review count and the
+    borderline range."""
+    open_ = lambda o: not o.get("inspector_decision")
+    graded = [o for o in onions if o["grade"] != "FOREIGN"]          # foreign objects never enter the lot %
+    n_foreign = len(onions) - len(graded)
+    tot_m = sum(o["mass_g"] for o in graded) or 1.0
+    by = lambda gr: sum(o["mass_g"] for o in graded if o["grade"] == gr)
+    cnt = lambda gr: sum(1 for o in graded if o["grade"] == gr)
+    n = len(graded) or 1
+    urs_on = cfg["grading"]["urs_reporting_enabled"]
+    b_a = sum(o["mass_g"] for o in graded if o["grade"] == "A" and o.get("borderline") and open_(o))
+    b_u = sum(o["mass_g"] for o in graded if o["grade"] == "URS" and o.get("borderline") and not o["defects"] and open_(o))
+    lot = {"n_onions": len(graded), "n_foreign_excluded": n_foreign,
+           "n_borderline": sum(1 for o in graded if o.get("borderline") and open_(o)),
+           "pct_gradeA_range_by_weight": [round(100 * (by("A") - b_a) / tot_m, 2), round(100 * (by("A") + b_u) / tot_m, 2)],
+           "n_review": sum(1 for o in onions if o["review"]),
+           "n_other_defect_inspector_check": sum(1 for o in onions if "other_defect" in o["defects"]),
+           "total_mass_g_est": round(tot_m, 1),
+           "pct_gradeA_by_weight": round(100 * by("A") / tot_m, 2),
+           "pct_URS_by_weight": round(100 * (by("URS") + by("UNFIT")) / tot_m, 2),
+           "pct_unfit_by_weight": round(100 * by("UNFIT") / tot_m, 2),
+           "pct_gradeA_by_count": round(100 * cnt("A") / n, 2),
+           "pct_URS_by_count": round(100 * (cnt("URS") + cnt("UNFIT")) / n, 2),
+           "second_bucket_label": "URS" if urs_on else "Below Grade A (URS not procured under current circular)"}
+    lot["n_review"] = sum(1 for o in onions if o["review"] and open_(o))
+    lot["n_inspector_decisions"] = sum(1 for o in onions if o.get("inspector_decision"))
+    return lot
+
+def apply_inspector_decision(result, onion_id, decision, inspector="-", note=""):
+    """Inspector overrides one onion's grade. The AI grade is kept beside it, the lot is recomputed,
+    and the caller re-signs the record. decision in {"A", "URS", "UNFIT"}."""
+    assert decision in ("A", "URS", "UNFIT"), decision
+    o = next(x for x in result["onions"] if x["id"] == int(onion_id))
+    ai = o.get("ai_grade", o["grade"])
+    o["ai_grade"] = ai
+    o["grade"] = decision
+    o["inspector_decision"] = {"ai_grade": ai, "final_grade": decision, "by": inspector or "-",
+                               "at": datetime.datetime.now().isoformat(timespec="seconds"),
+                               "flags": list(o["review"]), "note": note}
+    cfg_like = {"grading": result["config"]["grading"]}
+    result["lot"] = summarize_lot(result["onions"], cfg_like)
+    return o
+
 def grade_lot(images_bgr, detector, classifier, cfg=None, meta=None, model_info=None):
     cfg = cfg or DEFAULT_CONFIG
     meta = dict(meta or {})
@@ -551,27 +596,7 @@ def grade_lot(images_bgr, detector, classifier, cfg=None, meta=None, model_info=
         o["mass_g"] = mass_g(o["geom"]["major_mm"], o["geom"]["minor_mm"], cfg)
         judge(o, cfg)
 
-    graded = [o for o in onions if o["grade"] != "FOREIGN"]          # foreign objects never enter the lot %
-    n_foreign = len(onions) - len(graded)
-    tot_m = sum(o["mass_g"] for o in graded) or 1.0
-    by = lambda gr: sum(o["mass_g"] for o in graded if o["grade"] == gr)
-    cnt = lambda gr: sum(1 for o in graded if o["grade"] == gr)
-    n = len(graded) or 1
-    urs_on = cfg["grading"]["urs_reporting_enabled"]
-    b_a = sum(o["mass_g"] for o in graded if o["grade"] == "A" and o.get("borderline"))
-    b_u = sum(o["mass_g"] for o in graded if o["grade"] == "URS" and o.get("borderline") and not o["defects"])
-    lot = {"n_onions": len(graded), "n_foreign_excluded": n_foreign,
-           "n_borderline": sum(1 for o in graded if o.get("borderline")),
-           "pct_gradeA_range_by_weight": [round(100 * (by("A") - b_a) / tot_m, 2), round(100 * (by("A") + b_u) / tot_m, 2)],
-           "n_review": sum(1 for o in onions if o["review"]),
-           "n_other_defect_inspector_check": sum(1 for o in onions if "other_defect" in o["defects"]),
-           "total_mass_g_est": round(tot_m, 1),
-           "pct_gradeA_by_weight": round(100 * by("A") / tot_m, 2),
-           "pct_URS_by_weight": round(100 * (by("URS") + by("UNFIT")) / tot_m, 2),
-           "pct_unfit_by_weight": round(100 * by("UNFIT") / tot_m, 2),
-           "pct_gradeA_by_count": round(100 * cnt("A") / n, 2),
-           "pct_URS_by_count": round(100 * (cnt("URS") + cnt("UNFIT")) / n, 2),
-           "second_bucket_label": "URS" if urs_on else "Below Grade A (URS not procured under current circular)"}
+    lot = summarize_lot(onions, cfg)
     ce = [c["max_abs_error_mm"] for c in calib if c["max_abs_error_mm"] is not None]
     calib_summary = {"per_view": calib, "worst_circle_error_mm": max(ce) if ce else None,
                      "status": ("PASS" if ce and max(ce) <= 1.5 else ("WARN" if ce else "NOT MEASURED"))}
@@ -615,7 +640,7 @@ def draw(img, onions, ppm, offset_mm=(0.0, 0.0)):
         c = (int((g["cx_mm"] - offset_mm[0]) * ppm), int((g["cy_mm"] - offset_mm[1]) * ppm))
         ax = (max(1, int(g["major_mm"] * ppm / 2)), max(1, int(g["minor_mm"] * ppm / 2)))
         cv2.ellipse(img, c, ax, g["angle"], 0, 360, col, th)
-        if o["review"]:
+        if o["review"] and not o.get("inspector_decision"):
             cv2.ellipse(img, c, (ax[0] + 2 * th, ax[1] + 2 * th), g["angle"], 0, 360, (200, 60, 200), max(1, th // 2))
         t = str(o["id"]); (tw, tht), _ = cv2.getTextSize(t, cv2.FONT_HERSHEY_SIMPLEX, fs, th)
         org = (c[0] - tw // 2, c[1] + tht // 2)
@@ -693,7 +718,8 @@ def report_pdf(result, annotated_bgr, path):
            Paragraph(f"of which unfit (rotten): {lot['pct_unfit_by_weight']:.1f}% by weight &nbsp;|&nbsp; "
                      f"by count: Grade A {lot['pct_gradeA_by_count']:.1f}%, URS {lot['pct_URS_by_count']:.1f}% &nbsp;|&nbsp; "
                      f"{lot['n_onions']} onions assessed, est. {lot['total_mass_g_est']:.0f} g, "
-                     f"<b>{lot['n_review']} flagged for inspector review</b>", sm),
+                     f"<b>{lot['n_review']} awaiting inspector review</b>"
+                     + (f", <b>{lot.get('n_inspector_decisions', 0)} decided by inspector</b>" if lot.get('n_inspector_decisions') else ""), sm),
            Paragraph(f"<b>Grade A range {lot['pct_gradeA_range_by_weight'][0]:.1f}-{lot['pct_gradeA_range_by_weight'][1]:.1f}%</b> "
                      f"allowing for measurement uncertainty ({lot['n_borderline']} onion(s) within "
                      f"{result['config']['grading'].get('borderline_mm', 0):.0f} mm of a size limit)", sm)
@@ -707,10 +733,13 @@ def report_pdf(result, annotated_bgr, path):
     el += [Image(io.BytesIO(buf.tobytes()), width=W, height=W * h / w),
            Paragraph("Outline colour: green = Grade A, orange = URS, red = unfit. Magenta ring = inspector review.", sm),
            Spacer(1, 3*mm)]
-    rows = [["#", "diam mm", "mass g", "size", "defects", "grade", "review"]]
+    rows = [["#", "diam mm", "mass g", "size", "defects", "grade", "review / inspector decision"]]
     for o in result["onions"]:
+        d = o.get("inspector_decision")
+        grade = f"{d['ai_grade']}>{d['final_grade']}" if d else o["grade"]
+        rev = (f"INSPECTOR {d['by']}: {d['ai_grade']} -> {d['final_grade']}" if d else "; ".join(o["review"]))[:60] or "-"
         rows.append([o["id"], f"{o['diameter_mm']:.1f}", f"{o['mass_g']:.0f}", o["size_status"],
-                     ", ".join(o["defects"]) or "-", o["grade"], "; ".join(o["review"])[:60] or "-"])
+                     ", ".join(o["defects"]) or "-", grade, rev])
     t = Table(rows, colWidths=[8*mm, 16*mm, 14*mm, 20*mm, 30*mm, 14*mm, 80*mm], repeatRows=1)
     t.setStyle(TableStyle([("FONTSIZE", (0, 0), (-1, -1), 6.5), ("GRID", (0, 0), (-1, -1), 0.25, colors.lightgrey),
                            ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#EEEEEE"))]))

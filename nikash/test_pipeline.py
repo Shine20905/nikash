@@ -313,4 +313,20 @@ c4 = copy.deepcopy(CFG); c4["gate"]["max_circle_error_mm"] = 0.01          # for
 cres, _ = P.grade_lot([bimg], bdet, bcls, c4)
 check("v0.7.3: calibration circles off -> retake", cres["status"] == "REJECTED" and "circles" in cres["gates"][0].get("reason", ""),
       cres["gates"][0].get("reason", "-"))
+
+# ---------------- v0.7.4: inspector decisions ----------------
+ires, _ = P.grade_lot([bimg], bdet, bcls, CFG)                  # the 5-onion lot with one borderline 69 mm onion
+a0 = ires["lot"]["pct_gradeA_by_weight"]
+target = next(o for o in ires["onions"] if o.get("borderline"))
+P.apply_inspector_decision(ires, target["id"], "URS", "Shalma")
+ires = P.sign(ires, CFG)
+check("v0.7.4: inspector marks borderline onion URS -> lot %A drops, AI grade kept, review cleared",
+      ires["lot"]["pct_gradeA_by_weight"] < a0 and target["ai_grade"] == "A" and target["grade"] == "URS"
+      and ires["lot"]["n_inspector_decisions"] == 1 and ires["lot"]["n_borderline"] == 0,
+      f"{a0} -> {ires['lot']['pct_gradeA_by_weight']}")
+check("v0.7.4: decision is inside the signed record", P.verify(ires, CFG["signing_key"]))
+import os, tempfile
+_pdf = os.path.join(tempfile.gettempdir(), "nikash_decision_test.pdf")          # works on Windows too
+P.report_pdf(ires, P.annotate(P.rectify(bimg, CFG)[0], ires["onions"], CFG), _pdf)
+check("v0.7.4: report with inspector decision renders", os.path.getsize(_pdf) > 5000)
 print(f"\n{'ALL PASSED' if fails == 0 else f'{fails} FAILED'}")
