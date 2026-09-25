@@ -1,0 +1,23 @@
+# environment
+.venv/
+__pycache__/
+*.pyc
+
+# model weights (download from Kaggle - see README)
+models/
+
+# generated / private data
+reports/
+.gradio/
+phone_qr.png
+*.DNG
+*.dng
+*.jpg
+*.jpeg
+*.png
+*.pdf
+!docs/*.png
+
+# secrets
+.env
+kaggle.json

@@ -1,0 +1,10 @@
+# CPU install (Windows/Linux):
+#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+#   pip install -r requirements.txt
+ultralytics
+opencv-python
+gradio
+reportlab
+pyyaml
+numpy
+qrcode[pil]
