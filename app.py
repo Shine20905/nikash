@@ -77,7 +77,8 @@ def grade_images(imgs, lot_id, inspector, models):
     out.update({
         "pct_a": L["pct_gradeA_by_weight"], "pct_urs": L["pct_URS_by_weight"], "pct_unfit": L["pct_unfit_by_weight"],
         "bucket": L["second_bucket_label"], "n": L["n_onions"], "mass_g": round(L["total_mass_g_est"]),
-        "n_review": L["n_review"], "n_foreign": L.get("n_foreign_excluded", 0), "calib": cal["status"],
+        "n_review": L["n_review"], "n_foreign": L.get("n_foreign_excluded", 0),
+        "n_borderline": L.get("n_borderline", 0), "range_a": L.get("pct_gradeA_range_by_weight"), "calib": cal["status"],
         "calib_err": round(cal["worst_circle_error_mm"], 2) if cal["worst_circle_error_mm"] is not None else None,
         "signature": res["signature"]["payload_sha256"][:16],
         "image": "data:image/jpeg;base64," + base64.b64encode(cv2.imencode(".jpg", small, [cv2.IMWRITE_JPEG_QUALITY, 85])[1]).decode(),
@@ -223,6 +224,7 @@ function show(j){
     <div class="stat su"><div class="v">${j.pct_urs.toFixed(1)}%</div><div class="k">${esc(j.bucket)} · by weight</div></div></div>
     <div class="mini"><div><b>${j.n}</b><span>onions</span></div><div><b>${j.mass_g} g</b><span>est. weight</span></div>
     <div><b style="color:var(--rev)">${j.n_review}</b><span>inspector check</span></div></div>
+    ${j.n_borderline>0?`<div class="meta" style="color:var(--rev)"><b>Grade A range ${j.range_a[0].toFixed(0)}–${j.range_a[1].toFixed(0)}%</b> · ${j.n_borderline} onion${j.n_borderline>1?"s":""} within 2 mm of a size limit — inspector to confirm</div>`:""}
     ${j.n_foreign>0?`<div class="meta">${j.n_foreign} non-onion object${j.n_foreign>1?"s":""} excluded from the lot</div>`:""}
     ${j.pct_unfit>0?`<div class="meta" style="color:var(--unfit)">of which unfit (rotten): ${j.pct_unfit.toFixed(1)}%</div>`:""}
   </div>

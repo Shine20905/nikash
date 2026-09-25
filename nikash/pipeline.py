@@ -50,7 +50,8 @@ DEFAULT_CONFIG = {
              "max_tilt_deg": 20.0,
              "max_hidden_outline_frac": 0.40,        # PROVISIONAL - share of onions whose outline is mostly hidden
              "min_onions_for_crowd_check": 4,        # by neighbours -> heap, not a single layer -> retake
-             "max_touching_frac": 0.70},             # PROVISIONAL - real: spreads 0.2-0.6, packed photo 0.8 (1 photo)                  # PROVISIONAL - oblique views stretch 3-D onions (parallax)
+             "max_touching_frac": 0.70,
+             "max_circle_error_mm": 1.5},            # v0.7.3: printed circles off by more -> sheet not flat / distorted -> retake             # PROVISIONAL - real: spreads 0.2-0.6, packed photo 0.8 (1 photo)                  # PROVISIONAL - oblique views stretch 3-D onions (parallax)
     "camera": {"focal_px": None,                     # None -> 0.6 x image diagonal (26 mm-equiv phone main camera);
                "parallax_correction": True},         # checked vs self-calibration on 2 tilted real photos: within ~5-10%
     "white_balance": True,
@@ -58,6 +59,8 @@ DEFAULT_CONFIG = {
     "varieties": {"N-53": {"density_g_cm3": 0.8997, "axis_ratio_k": 1.0766}},
     "grading": {
         "size_min_mm": 45.0, "size_max_mm": 70.0,
+        "borderline_mm": 2.0,                      # v0.7.3: |d - limit| < this -> borderline, lot % reported as a range
+                                                   # (real repeatability 1.5 mm; one onion at 69-71 mm flipped a lot 36 pp)
         "diameter_definition": "max_equatorial",   # PROVISIONAL - confirm DoCA/AGMARK
         "urs_defects": ["sprouted"],               # other_defect = inspector review only (v0.7): the catch-all head
                                                   # false-alarms on sharp real photos; it must not auto-downgrade
@@ -432,9 +435,15 @@ def judge(o, cfg, calibrated=True):
     if o["geom"]["method"] == "grabcut": review.append("low-contrast skin - size estimated")
     if o["geom"]["edge_touch"]: review.append("touching neighbour - outline mostly hidden")
 
+    o["borderline"] = False
     if calibrated:
         d = o["diameter_mm"]
         size = "undersized" if d < gr["size_min_mm"] else ("oversized" if d > gr["size_max_mm"] else "in_band")
+        bm = gr.get("borderline_mm", 0.0)
+        for lim in (gr["size_min_mm"], gr["size_max_mm"]):
+            if abs(d - lim) < bm:
+                o["borderline"] = True
+                review.append(f"borderline size {d:.1f} mm (limit {lim:.0f} mm) - inspector to confirm")
     else:
         size = "not_measured"
     if any(x in gr["unfit_defects"] for x in defects): grade = "UNFIT"
@@ -490,8 +499,15 @@ def grade_lot(images_bgr, detector, classifier, cfg=None, meta=None, model_info=
         rect, gate = rectify(img, cfg)
         gate["view"] = vi; gates.append(gate)
         if rect is None: continue
+        cc = check_circles(rect, cfg)
+        lim = cfg["gate"].get("max_circle_error_mm")
+        if lim is not None and cc["max_abs_error_mm"] is not None and cc["max_abs_error_mm"] > lim:
+            gate["ok"] = False; gate["circle_error_mm"] = round(cc["max_abs_error_mm"], 2)
+            gate["reason"] = (f"calibration circles off by {cc['max_abs_error_mm']:.1f} mm - sheet not flat or photo "
+                              "distorted; flatten the sheet, hold the phone flat and retake")
+            continue
         rects.append((vi, rect))
-        calib.append(check_circles(rect, cfg))
+        calib.append(cc)
         boxes = detect(rect, detector, cfg)
         crops = [crop_for_classifier(rect, b) for b in boxes]
         P = classifier(crops) if crops else np.zeros((0, 3))
@@ -542,7 +558,11 @@ def grade_lot(images_bgr, detector, classifier, cfg=None, meta=None, model_info=
     cnt = lambda gr: sum(1 for o in graded if o["grade"] == gr)
     n = len(graded) or 1
     urs_on = cfg["grading"]["urs_reporting_enabled"]
+    b_a = sum(o["mass_g"] for o in graded if o["grade"] == "A" and o.get("borderline"))
+    b_u = sum(o["mass_g"] for o in graded if o["grade"] == "URS" and o.get("borderline") and not o["defects"])
     lot = {"n_onions": len(graded), "n_foreign_excluded": n_foreign,
+           "n_borderline": sum(1 for o in graded if o.get("borderline")),
+           "pct_gradeA_range_by_weight": [round(100 * (by("A") - b_a) / tot_m, 2), round(100 * (by("A") + b_u) / tot_m, 2)],
            "n_review": sum(1 for o in onions if o["review"]),
            "n_other_defect_inspector_check": sum(1 for o in onions if "other_defect" in o["defects"]),
            "total_mass_g_est": round(tot_m, 1),
@@ -674,6 +694,10 @@ def report_pdf(result, annotated_bgr, path):
                      f"by count: Grade A {lot['pct_gradeA_by_count']:.1f}%, URS {lot['pct_URS_by_count']:.1f}% &nbsp;|&nbsp; "
                      f"{lot['n_onions']} onions assessed, est. {lot['total_mass_g_est']:.0f} g, "
                      f"<b>{lot['n_review']} flagged for inspector review</b>", sm),
+           Paragraph(f"<b>Grade A range {lot['pct_gradeA_range_by_weight'][0]:.1f}-{lot['pct_gradeA_range_by_weight'][1]:.1f}%</b> "
+                     f"allowing for measurement uncertainty ({lot['n_borderline']} onion(s) within "
+                     f"{result['config']['grading'].get('borderline_mm', 0):.0f} mm of a size limit)", sm)
+           if lot.get("n_borderline") else Spacer(1, 0),
            Paragraph(f"Calibration self-check: <b>{cal['status']}</b> (worst printed-circle error "
                      f"{cal['worst_circle_error_mm'] if cal['worst_circle_error_mm'] is None else round(cal['worst_circle_error_mm'],2)} mm) &nbsp;|&nbsp; "
                      f"views accepted {result['views_accepted']} &nbsp;|&nbsp; processing {result['processing_s']} s", sm),

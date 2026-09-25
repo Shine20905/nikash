@@ -299,4 +299,18 @@ check("v0.7.2: green-calyx object -> FOREIGN, excluded from lot count",
       f"{fres['lot']['n_onions']} onions, foreign {fres['lot']['n_foreign_excluded']}")
 check("v0.7.2: sprouted onion (green shoot) stays SPROUTED, not foreign",
       any("sprouted" in o["defects"] for o in fres["onions"]))
+
+# ---------------- v0.7.3: borderline sizes -> range; bad calibration -> retake ----------------
+bspec = [(60, 120, 69.2, 0.95, 0, "healthy"), (150, 120, 55, 0.9, 0, "healthy"), (230, 120, 58, 0.9, 0, "healthy"),
+         (60, 200, 52, 0.9, 0, "healthy"), (150, 200, 60, 0.9, 0, "healthy")]
+bimg, bgt = make_lot(bspec); bdet, bcls = mock_models(bgt, jitter=0.03)
+bres, _ = P.grade_lot([bimg], bdet, bcls, CFG)
+rng_ = bres["lot"]["pct_gradeA_range_by_weight"]
+check("v0.7.3: 69 mm onion flagged borderline, lot % given as a range",
+      bres["lot"]["n_borderline"] == 1 and rng_[0] < rng_[1] and any("borderline" in r for o in bres["onions"] for r in o["review"]),
+      f"range {rng_}, A {bres['lot']['pct_gradeA_by_weight']}")
+c4 = copy.deepcopy(CFG); c4["gate"]["max_circle_error_mm"] = 0.01          # force the check to trip
+cres, _ = P.grade_lot([bimg], bdet, bcls, c4)
+check("v0.7.3: calibration circles off -> retake", cres["status"] == "REJECTED" and "circles" in cres["gates"][0].get("reason", ""),
+      cres["gates"][0].get("reason", "-"))
 print(f"\n{'ALL PASSED' if fails == 0 else f'{fails} FAILED'}")
