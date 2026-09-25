@@ -4,10 +4,11 @@ Nikash - onion quality grading app (SIH 2026, PS 26031).
     python app.py            start the app (laptop + phone links + QR code)
     python app.py --check    grade test.jpg / test.dng in this folder once and exit
 
-Every onion the AI flags goes to the inspector, who taps Keep A / URS / Unfit. The AI grade is
-kept beside the decision, the lot is recomputed and the record is re-signed.
 
-Folder:  app.py, nikash/ (code v0.7.4+), models/detector, models/defect, models/calibration
+The AI grades every onion (size band, rot, sprouting, damage, dark-patch %) and the inspector can
+confirm or overrule any call; the AI grade stays beside the decision in the signed record.
+
+Folder:  app.py, nikash/ (code v0.8+), models/detector, models/defect, models/calibration
 """
 import sys, time, json, base64, pathlib, datetime, socket, uuid, threading
 import cv2, numpy as np
@@ -76,7 +77,8 @@ def view(scan_id, S):
         "pdf": f"/r/{S['stem']}.pdf?v={S['version']}", "json": f"/r/{S['stem']}_signed.json?v={S['version']}",
         "onions": [{"id": o["id"], "d": round(o["diameter_mm"], 1), "m": round(o["mass_g"]), "size": o["size_status"],
                     "grade": o["grade"], "ai_grade": o.get("ai_grade", o["grade"]), "defects": o["defects"],
-                    "review": o["review"], "decision": o.get("inspector_decision")} for o in res["onions"]],
+                    "review": o["review"], "decision": o.get("inspector_decision"),
+                    "dark": o.get("dark_pct", 0.0)} for o in res["onions"]],
     }
 
 def save(S):
@@ -262,32 +264,32 @@ function show(j,keepScroll){
       <ol class="tips"><li>Spread onions in one layer with gaps</li><li>Keep all 4 corner markers in view</li><li>Hold the phone flat above the sheet</li></ol>
       <button class="btn primary" onclick="again(true)">Retake photos</button></div>`; window.scrollTo(0,0); return;}
   const on=j.onions.map(o=>{
-    const d=o.decision, flagged=o.review.length&&!d&&o.grade!=="FOREIGN";
+    const d=o.decision, flagged=!d&&o.grade!=="FOREIGN"&&(o.review.length>0||o.defects.length>0);   // clear size-only calls need no buttons
     return `<div class="onion" id="o${o.id}"><div class="orow"><div class="badge" style="background:${GC[o.grade]}">${o.id}</div>
-     <div class="t"><b>${o.d} mm</b> · ${o.m} g<small>${o.grade==="FOREIGN"?"excluded from lot %":o.size.replace("_"," ")}${o.defects.length?" · "+o.defects.join(", "):""}</small>
+     <div class="t"><b>${o.d} mm</b> · ${o.m} g<small>${o.grade==="FOREIGN"?"excluded from lot %":o.size.replace("_"," ")}${o.defects.length?" · "+o.defects.map(x=>x.replace("_"," ")).join(", "):""}${o.dark>=1?` · dark ${o.dark.toFixed(0)}%`:""}</small>
      ${o.review.length&&!d?`<div class="flag">⚑ ${esc(nice(o.review))}</div>`:""}</div>
      <span class="pill" style="background:${GC[o.grade]}">${label(o.grade,j.bucket)}</span></div>
-     ${flagged?`<div class="decide"><button class="dA" onclick="decide(${o.id},'A')">Keep A</button>
+     ${flagged?`<div class="decide"><button class="dA" onclick="decide(${o.id},'A')">${o.grade==="A"?"Keep A":"Make A"}</button>
         <button class="dU" onclick="decide(${o.id},'URS')">${esc(j.bucket==="URS"?"URS":"Below A")}</button>
         <button class="dX" onclick="decide(${o.id},'UNFIT')">Unfit</button></div>`:""}
      ${d?`<div class="done">✓ Inspector${d.by&&d.by!=="-"?" "+esc(d.by):""}: ${label(d.ai_grade,j.bucket)} → ${label(d.final_grade,j.bucket)}</div>`:""}</div>`}).join("");
   const ok=j.photos.filter(p=>p.ok).map(p=>`tilt ${Math.round(p.tilt)}°, ${p.height_cm} cm`).join(" · ");
-  const todo=j.n_review>0?`<div class="todo">⚑ ${j.n_review} onion${j.n_review>1?"s":""} need your decision — scroll to "Per onion"</div>`
+  const todo=j.n_review>0?`<div class="todo">⚑ ${j.n_review} AI call${j.n_review>1?"s":""} to confirm or overrule — see "Per onion"</div>`
     :(j.n_decided?`<div class="meta">✓ All flags resolved · ${j.n_decided} inspector decision${j.n_decided>1?"s":""} recorded in the signed report</div>`:"");
   R.innerHTML=`
   <div class="card stack"><div class="meta">Lot <b>${esc(j.lot_id)}</b></div>
     <div class="stats"><div class="stat sa"><div class="v">${j.pct_a.toFixed(1)}%</div><div class="k">Grade A · by weight</div></div>
     <div class="stat su"><div class="v">${j.pct_urs.toFixed(1)}%</div><div class="k">${esc(j.bucket)} · by weight</div></div></div>
     <div class="mini"><div><b>${j.n}</b><span>onions</span></div><div><b>${j.mass_g} g</b><span>est. weight</span></div>
-    <div><b style="color:var(--rev)">${j.n_review}</b><span>awaiting inspector</span></div></div>
-    ${j.n_borderline>0?`<div class="meta" style="color:var(--rev)"><b>Grade A range ${j.range_a[0].toFixed(0)}–${j.range_a[1].toFixed(0)}%</b> · ${j.n_borderline} onion${j.n_borderline>1?"s":""} within 2 mm of a size limit</div>`:""}
+    <div><b style="color:var(--rev)">${j.n_review}</b><span>inspector checks</span></div></div>
+    ${(j.range_a&&j.range_a[1]-j.range_a[0]>=0.5)?`<div class="meta" style="color:var(--rev)"><b>Grade A ${j.range_a[0].toFixed(0)}–${j.range_a[1].toFixed(0)}%</b> depending on inspector checks${j.n_borderline?` · ${j.n_borderline} within 2 mm of a size limit`:""}</div>`:""}
     ${j.n_foreign>0?`<div class="meta">${j.n_foreign} non-onion object${j.n_foreign>1?"s":""} excluded from the lot</div>`:""}
     ${j.pct_unfit>0?`<div class="meta" style="color:var(--unfit)">of which unfit: ${j.pct_unfit.toFixed(1)}%</div>`:""}
     ${todo}
   </div>
   <div class="card res"><img src="${j.image}" alt="annotated lot">
     <div class="legend"><span><i class="dot" style="background:var(--a)"></i>Grade A</span><span><i class="dot" style="background:var(--urs)"></i>${esc(j.bucket)}</span>
-    <span><i class="dot" style="background:var(--unfit)"></i>Unfit</span><span><i class="dot" style="background:#8a8a8a"></i>Not onion</span><span><i class="dot" style="background:var(--rev)"></i>Awaiting inspector</span></div></div>
+    <span><i class="dot" style="background:var(--unfit)"></i>Unfit</span><span><i class="dot" style="background:#8a8a8a"></i>Not onion</span><span><i class="dot" style="background:var(--rev)"></i>Inspector check</span></div></div>
   <div class="card"><h2>Per onion</h2>${on}</div>
   <div class="card stack"><a class="btn primary" href="${j.pdf}" target="_blank">⬇ Report (PDF)</a>
     <a class="btn ghost" href="${j.json}" target="_blank">Signed record (JSON)</a>

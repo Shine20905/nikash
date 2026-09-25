@@ -11,12 +11,15 @@ defect check, and a lot-level **% Grade A / % URS by weight**, with a signed PDF
 2. **Detection** – YOLO11n (single class: onion).
 3. **Size** – colour segmentation + watershed for touching onions, ellipse fit,
    parallax correction from the camera height (onions stand ~D/2 above the paper).
-4. **Defects** – MobileNetV3-Small, 3 heads: rotten → UNFIT, sprouted → URS,
-   other anomaly → inspector review (never auto-downgrades). Leafy non-onion objects are excluded.
+4. **Defects (AI decides)** – MobileNetV3-Small heads + measured surface: rotten → UNFIT;
+   dark/black patches > 30 % of the visible surface → UNFIT; dark patches 3–30 %, suspected damage/peeling,
+   or sprouting → URS. Leafy non-onion objects are excluded from the lot.
 5. **Rules** – configurable size band (default 45–70 mm), mass-weighted lot percentages;
    onions within 2 mm of a limit are flagged borderline and the lot % is shown as a range.
-6. **Inspector in the loop** – every flagged onion gets Keep A / URS / Unfit buttons; the AI grade
-   and the inspector's decision (name, time) are both kept in the signed record.
+   Limits follow publicly reported June 2026 procurement norms (30 % blackening) and the Codex onion
+   standard (no rot); the 3 % Grade A dark-patch limit is provisional pending the official circular.
+6. **Inspector in the loop** – every AI downgrade or uncertain call gets Make A / URS / Unfit buttons;
+   the AI grade and the inspector's decision (name, time) are both kept in the signed record.
 7. **Report** – annotated image, per-onion table, HMAC-signed JSON record, PDF.
 
 ## Results so far (prototype, one kitchen lot)
@@ -31,8 +34,9 @@ defect check, and a lot-level **% Grade A / % URS by weight**, with a signed PDF
 | Processing time | ≈ 3–6 s per photo on a laptop CPU (incl. phone upload) |
 | Borderline onion (ruler 70 mm) | read 70.2 and 68.1 mm in two scans, flagged borderline both times |
 
-Limitations: one variety and one lot tested; foreign objects are only caught when they have
-leafy-green parts; black mould is not a trained class; size band pending DoCA/AGMARK confirmation.
+Limitations: one variety and one lot tested; no real mouldy or rotten onions tested yet (dark-patch rule
+validated on healthy onions: 0–1 % dark, and on synthetic patches: 15 % → 14.3 % measured);
+foreign objects only caught when they have leafy-green parts; size band pending DoCA/AGMARK confirmation.
 
 ## Run it
 ```

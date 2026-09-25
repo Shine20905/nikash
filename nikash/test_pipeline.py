@@ -268,8 +268,8 @@ print("\n--- v0.7 policy + crowd gate ---")
 o = {"probs": {"rotten": 0.01, "sprouted": 0.02, "binary_bad": 0.97}, "diameter_mm": 55.0,
      "geom": {"method": "colour-hull", "edge_touch": False}}
 P.judge(o, CFG)
-check("other_defect alone keeps Grade A but goes to inspector review",
-      o["grade"] == "A" and any("inspector" in r for r in o["review"]), (o["grade"], o["review"]))
+check("v0.8: other_defect -> AI grades URS, inspector may overrule",
+      o["grade"] == "URS" and any("overrule" in r for r in o["review"]), (o["grade"], o["review"]))
 heap = [(40 + 44 * i + (22 if j % 2 else 0), 110 + 38 * j, 46, 0.95, 0, "healthy")
         for j in range(4) for i in range(5) if 40 + 44 * i + (22 if j % 2 else 0) < 270]
 himg, hgt = make_lot(heap); hdet, hcls = mock_models(hgt, jitter=0.03)
@@ -329,4 +329,23 @@ import os, tempfile
 _pdf = os.path.join(tempfile.gettempdir(), "nikash_decision_test.pdf")          # works on Windows too
 P.report_pdf(ires, P.annotate(P.rectify(bimg, CFG)[0], ires["onions"], CFG), _pdf)
 check("v0.7.4: report with inspector decision renders", os.path.getsize(_pdf) > 5000)
+
+# ---------------- v0.8: measured dark surface drives URS / Unfit ----------------
+def lot_with_patch(frac):
+    img, gt = make_lot(SPEC)
+    cx, cy, maj, ratio = SPEC[0][0], SPEC[0][1], SPEC[0][2], SPEC[0][3]
+    # black patch centred on onion 0, sized to cover ~frac of the measured (80%) area
+    a, b = maj / 2 * 0.8, maj * ratio / 2 * 0.8
+    r = math.sqrt(frac * a * b)
+    cv2.circle(img, (int(cx * PPM), int(cy * PPM)), int(r * PPM), (25, 25, 30), -1)
+    d, c = mock_models(gt, jitter=0.03)
+    res, _ = P.grade_lot([img], d, c, CFG)
+    o = min(res["onions"], key=lambda o: math.hypot(o["geom"]["cx_mm"] - cx, o["geom"]["cy_mm"] - cy))
+    return o
+o0 = lot_with_patch(0.0); o15 = lot_with_patch(0.15); o45 = lot_with_patch(0.45)
+check("v0.8: clean onion -> dark ~0%, Grade A", o0["dark_pct"] < 1.0 and o0["grade"] == "A", (o0["dark_pct"], o0["grade"]))
+check("v0.8: 15% black patch -> URS (dark_patches)", o15["grade"] == "URS" and "dark_patches" in o15["defects"],
+      (o15["dark_pct"], o15["grade"], o15["defects"]))
+check("v0.8: 45% blackening -> UNFIT (heavy_blackening > 30%)", o45["grade"] == "UNFIT" and "heavy_blackening" in o45["defects"],
+      (o45["dark_pct"], o45["grade"], o45["defects"]))
 print(f"\n{'ALL PASSED' if fails == 0 else f'{fails} FAILED'}")

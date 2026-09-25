@@ -62,9 +62,16 @@ DEFAULT_CONFIG = {
         "borderline_mm": 2.0,                      # v0.7.3: |d - limit| < this -> borderline, lot % reported as a range
                                                    # (real repeatability 1.5 mm; one onion at 69-71 mm flipped a lot 36 pp)
         "diameter_definition": "max_equatorial",   # PROVISIONAL - confirm DoCA/AGMARK
-        "urs_defects": ["sprouted"],               # other_defect = inspector review only (v0.7): the catch-all head
-                                                  # false-alarms on sharp real photos; it must not auto-downgrade
-        "unfit_defects": ["rotten"],
+        # v0.8: the AI decides URS / Unfit itself; the inspector can overrule any call (recorded beside it).
+        # Reported June 2026 relaxed spec (news; official circular not yet seen): up to 30% blackening,
+        # 40% spots/discolouration, 10% sunburn, one peeled outer layer. Codex CXS 348: no rot in any class.
+        "urs_defects": ["sprouted", "other_defect", "dark_patches"],
+        "unfit_defects": ["rotten", "heavy_blackening"],
+        "surface": {"dark_v_max": 55,             # HSV value below this = black/dark patch (after white balance)
+                    "a_max_dark_pct": 3.0,        # PROVISIONAL: Grade A allows < 3% dark surface
+                                                  #   (real healthy onions: <= 0.7% in 50 onion-photos)
+                    "urs_max_dark_pct": 30.0,     # reported relaxed-spec blackening limit; above -> Unfit
+                    "ellipse_shrink": 0.80},      # measure inside 80% of the outline: rim shading/shadow excluded
         "urs_reporting_enabled": True,
     },
     "router": {"logit_band": 1.0,
@@ -425,12 +432,19 @@ def judge(o, cfg, calibrated=True):
     rotten = pr["rotten"] >= thr["rotten"]
     sprouted = pr["sprouted"] >= thr["sprouted"]
     other = pr["binary_bad"] >= thr["binary_bad"] and not rotten and not sprouted
-    defects = [n for n, f in (("rotten", rotten), ("sprouted", sprouted), ("other_defect", other)) if f]
+    sc = cfg["grading"].get("surface", {})
+    dark = float(o.get("dark_pct", 0.0))
+    heavy = dark > sc.get("urs_max_dark_pct", 101)
+    patches = (not heavy) and dark >= sc.get("a_max_dark_pct", 101)
+    defects = [n for n, f in (("rotten", rotten), ("sprouted", sprouted), ("other_defect", other),
+                              ("heavy_blackening", heavy), ("dark_patches", patches)) if f]
 
     review = []
     for h in cfg["router"].get("uncertain_heads", ("rotten", "sprouted", "binary_bad")):
         if abs(_logit(pr[h]) - _logit(thr[h])) < band: review.append(f"uncertain:{h}")
-    if other: review.append("other defect - possible damage, inspector to confirm")
+    if other: review.append("damage / blemish suspected by AI - inspector may overrule")
+    if heavy: review.append(f"dark / black patches on {dark:.0f}% of visible surface (> {sc['urs_max_dark_pct']:.0f}%)")
+    elif patches: review.append(f"dark patches on {dark:.0f}% of visible surface")
     if o["geom"]["method"] == "box-fallback": review.append("size from box (outline not isolated)")
     if o["geom"]["method"] == "grabcut": review.append("low-contrast skin - size estimated")
     if o["geom"]["edge_touch"]: review.append("touching neighbour - outline mostly hidden")
@@ -482,13 +496,30 @@ def merge_views(views, cfg):
         probs = {h: float(max(x["probs"][h] for x in obs)) for h in obs[0]["probs"]}   # worst view wins
         out.append({"id": i + 1, "views": sorted(m["_views"]), "geom": g, "probs": probs,
                     "box": obs[0]["box"], "view0_box": next((x["box"] for x in obs if x["view"] == 0), None),
-                    "green_frac": float(max(x.get("green_frac", 0.0) for x in obs))})
+                    "green_frac": float(max(x.get("green_frac", 0.0) for x in obs)),
+                    "dark_pct": float(max(x.get("dark_pct", 0.0) for x in obs))})     # worst view wins
     return out
 
 # --------------------------------------------------------------------------------------
 # Orchestration
 # --------------------------------------------------------------------------------------
 def _sha256(b): return hashlib.sha256(b).hexdigest()
+
+def surface_dark_pct(rect, geom, cfg, hsv=None):
+    """% of the visible onion surface that is dark/black (mould, blackening, rot patches).
+    Measured inside the fitted outline (as projected on the sheet), shrunk to skip rim shading and
+    cast shadows. Dark pixels are deliberately NOT required to be onion-coloured: black mould has no
+    colour, so the colour mask would drop exactly the pixels we need."""
+    sc = cfg["grading"].get("surface", {})
+    ppm = cfg["px_per_mm"]; k = sc.get("ellipse_shrink", 0.8)
+    s = geom.get("parallax_scale", 1.0) or 1.0
+    ax = (max(1, int(geom["major_mm"] / s * ppm / 2 * k)), max(1, int(geom["minor_mm"] / s * ppm / 2 * k)))
+    c = (int(geom["cx_mm"] * ppm), int(geom["cy_mm"] * ppm))
+    m = np.zeros(rect.shape[:2], np.uint8)
+    cv2.ellipse(m, c, ax, geom.get("angle", 0.0), 0, 360, 1, -1)
+    if hsv is None: hsv = cv2.cvtColor(rect, cv2.COLOR_BGR2HSV)
+    v = hsv[..., 2][m > 0]
+    return float(100.0 * (v < sc.get("dark_v_max", 55)).mean()) if v.size else 0.0
 
 def summarize_lot(onions, cfg):
     """Lot percentages from per-onion grades. Re-run after an inspector decision changes a grade.
@@ -502,7 +533,9 @@ def summarize_lot(onions, cfg):
     cnt = lambda gr: sum(1 for o in graded if o["grade"] == gr)
     n = len(graded) or 1
     urs_on = cfg["grading"]["urs_reporting_enabled"]
-    b_a = sum(o["mass_g"] for o in graded if o["grade"] == "A" and o.get("borderline") and open_(o))
+    # low end of the range: every Grade A onion that is still uncertain (borderline size OR any open
+    # inspector flag) might end up below A; high end: size-only borderline URS might end up A
+    b_a = sum(o["mass_g"] for o in graded if o["grade"] == "A" and open_(o) and (o.get("borderline") or o["review"]))
     b_u = sum(o["mass_g"] for o in graded if o["grade"] == "URS" and o.get("borderline") and not o["defects"] and open_(o))
     lot = {"n_onions": len(graded), "n_foreign_excluded": n_foreign,
            "n_borderline": sum(1 for o in graded if o.get("borderline") and open_(o)),
@@ -579,7 +612,8 @@ def grade_lot(images_bgr, detector, classifier, cfg=None, meta=None, model_info=
             x1, y1, x2, y2 = [int(round(v)) for v in b[:4]]
             roi = leaf[max(0, y1):max(0, y2), max(0, x1):max(0, x2)]
             green = float(roi.mean()) if roi.size else 0.0
-            onions.append({"view": vi, "box": b, "geom": g, "green_frac": round(green, 4),
+            dark = surface_dark_pct(rect, g, cfg, hsv) if g.get("method") != "box-fallback" else 0.0
+            onions.append({"view": vi, "box": b, "geom": g, "green_frac": round(green, 4), "dark_pct": round(dark, 1),
                            "probs": {"rotten": float(p[0]), "sprouted": float(p[1]), "binary_bad": float(p[2])}})
         views.append(onions)
 
@@ -721,9 +755,9 @@ def report_pdf(result, annotated_bgr, path):
                      f"<b>{lot['n_review']} awaiting inspector review</b>"
                      + (f", <b>{lot.get('n_inspector_decisions', 0)} decided by inspector</b>" if lot.get('n_inspector_decisions') else ""), sm),
            Paragraph(f"<b>Grade A range {lot['pct_gradeA_range_by_weight'][0]:.1f}-{lot['pct_gradeA_range_by_weight'][1]:.1f}%</b> "
-                     f"allowing for measurement uncertainty ({lot['n_borderline']} onion(s) within "
-                     f"{result['config']['grading'].get('borderline_mm', 0):.0f} mm of a size limit)", sm)
-           if lot.get("n_borderline") else Spacer(1, 0),
+                     f"depending on {lot['n_review']} inspector check(s)"
+                     f" ({lot['n_borderline']} within {result['config']['grading'].get('borderline_mm', 0):.0f} mm of a size limit)", sm)
+           if lot["pct_gradeA_range_by_weight"][1] - lot["pct_gradeA_range_by_weight"][0] >= 0.5 else Spacer(1, 0),
            Paragraph(f"Calibration self-check: <b>{cal['status']}</b> (worst printed-circle error "
                      f"{cal['worst_circle_error_mm'] if cal['worst_circle_error_mm'] is None else round(cal['worst_circle_error_mm'],2)} mm) &nbsp;|&nbsp; "
                      f"views accepted {result['views_accepted']} &nbsp;|&nbsp; processing {result['processing_s']} s", sm),
